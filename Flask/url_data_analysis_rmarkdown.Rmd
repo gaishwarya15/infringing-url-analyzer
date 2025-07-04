@@ -1,0 +1,215 @@
+---
+author: "Aishwarya Gaddam"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+Install Packages
+
+```{r setup, include=FALSE}
+install.packages("jsonlite")
+install.packages("httr")
+install.packages("curl")
+install.packages("dplyr")
+install.packages("ggplot2")
+install.packages("parallel")
+```
+
+Load the libraries
+
+```{r}
+library(jsonlite)
+library(httr)
+library(curl)
+library(ggplot2)
+library(dplyr)
+library(parallel)
+```
+
+Function to resolve URL to IP address
+Basically it takes the URL and retrieves it's IP address
+```{r}
+get_ip_address <- function(url) {
+  tryCatch({
+    hostname <- parse_url(url)$hostname
+    if (is.null(hostname) || hostname == "") {
+      return(NA)  # Return NA if hostname extraction fails
+    }
+    ip_address <- curl::nslookup(hostname)
+    if (length(ip_address) > 0) {
+      return(ip_address[1])  # Return the first IP address
+    } else {
+      return(NA)  # Return NA if no IP address found
+    }
+  }, error = function(e) {
+    message(paste("Error resolving URL:", url, "Error:", e$message))
+    return(NA)  # Return NA if an error occurs
+  })
+}
+
+```
+
+Load the response.json into json_data
+extract all the works from each notice from json_data
+Create an empty vector all_infringing_urls to store all the infringing urls
+Later, remove if any duplicates found
+```{r}
+# Load the JSON data from the file
+json_file <- "D:/Flask/response.json"
+json_data <- fromJSON(json_file)
+
+# Extract the 'works' list from the JSON data
+works_list <- json_data$notices$works
+
+
+# Initialize an empty vector to store all infringing URLs
+all_infringing_urls <- c()
+
+# Loop through each work and collect infringing URLs
+for (work in works_list) {
+  if (!is.null(work$infringing_urls)) {
+    urls <- sapply(work$infringing_urls, function(x) x$url)
+    all_infringing_urls <- c(all_infringing_urls, urls)
+  }
+}
+
+# Remove duplicates if needed
+all_infringing_urls <- unique(all_infringing_urls)
+
+# Print the variable containing all infringing URLs
+# print(all_infringing_urls)
+
+```
+
+
+Flatten all_infringing_urls
+Remove duplicate URL's after flattening
+Create a batch size to segregate every batch for faster processing
+```{r}
+# Flatten the list of URLs
+flattened_urls <- unlist(all_infringing_urls, use.names = FALSE)
+
+# Remove duplicate URLs to avoid redundant IP resolution
+unique_urls <- unique(flattened_urls)
+
+# Define batch size
+batch_size <- 1000  # Adjust based on your memory capacity and processing speed
+
+```
+
+Function to process a batch of URLs
+
+```{r}
+
+# Function to process a batch of URLs
+process_batch <- function(urls) {
+  result <- sapply(urls, get_ip_address)
+  # Debug output
+  message("Processed batch with ", length(urls), " URLs.")
+  return(result)
+}
+```
+
+
+Set number of cores = 4
+Now split those URL's into batches (each of 1000)
+
+```{r}
+# Number of cores to use for parallel processing
+num_cores <- 4  # Set this to the number of cores you want to use
+
+# Split URLs into batches
+num_batches <- ceiling(length(unique_urls) / batch_size)
+batches <- split(unique_urls, ceiling(seq_along(unique_urls) / batch_size))
+
+```
+
+
+```{r}
+# Set up parallel processing
+cl <- makeCluster(num_cores)
+clusterExport(cl, c("batches", "process_batch", "get_ip_address", "parse_url", "curl"))
+clusterEvalQ(cl, library(curl))
+
+```
+
+Process batches parallely and finally stop the cluster
+
+```{r}
+# Process batches in parallel
+results <- parLapply(cl, batches, process_batch)
+
+# Stop the cluster
+stopCluster(cl)
+
+```
+
+Combine unique_urls to all_urls and results to all_ips
+
+```{r}
+# Combine results
+all_urls <- unlist(unique_urls)
+all_ips <- unlist(results)
+
+```
+
+
+Create a data frame with URL and IP Addresses
+```{r}
+# Create a data frame with the results
+df <- data.frame(
+  URL = all_urls,
+  IP_Address = all_ips,
+  stringsAsFactors = FALSE
+)
+```
+
+Just for displaying the first 10 records of the dataframe
+```{r}
+# Display the first 10 URLs and their corresponding IP addresses
+print(head(df, 10))
+
+```
+
+Save the data frame to a CSV file - rmarkdown_output.csv
+```{r}
+write.csv(df, "rmarkdown_output.csv", row.names = FALSE)
+print("CSV file created and saved to 'rmarkdown_output.csv'.")
+```
+```{r}
+
+# Count the frequency of each IP address
+ip_counts <- df %>%
+  count(IP_Address, sort = TRUE)
+```
+
+
+```{r}
+# Top 10 most frequent IP addresses
+top_10_ips <- ip_counts %>% 
+  top_n(n = 10, wt = n)
+
+ggplot(top_10_ips, aes(x = reorder(IP_Address, n), y = n)) +
+  geom_bar(stat = "identity", fill = "lightslategrey") +
+  coord_flip() +
+  labs(title = "Top 10 Most Frequent IP Addresses",
+       x = "IP Address",
+       y = "Frequency") +
+  theme_minimal()
+```
+
+```{r}
+if (!require(urltools)) {
+  install.packages("urltools")
+  library(urltools)
+}
+
+all_infringing_urls <- unlist(all_infringing_urls)
+domains <- urltools::domain(all_infringing_urls)
+
+# Count the number of unique domains
+num_unique_domains <- length(unique(domains))
+# Print the number of unique domains
+print(paste("Number of unique domains:",num_unique_domains))
+print(length(all_infringing_urls))
+```
